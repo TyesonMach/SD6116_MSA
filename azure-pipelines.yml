@@ -96,7 +96,6 @@ stages:
         repository: $(backendImageName)
         tags: |
           $(TAG)
-          latest
 
     - task: Docker@2
       condition: eq(variables['BuildFrontend'], 'true')
@@ -107,7 +106,6 @@ stages:
         repository: $(frontendImageName)
         tags: |
           $(TAG)
-          latest
 
     # --- Inject the computed tags into manifests under ./azure ---
     # Uses placeholders if present; otherwise replaces the first "image:" line in each file.
