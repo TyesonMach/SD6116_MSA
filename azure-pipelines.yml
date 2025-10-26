@@ -110,33 +110,40 @@ stages:
     # --- Inject the computed tags into manifests under ./azure ---
     # Uses placeholders if present; otherwise replaces the first "image:" line in each file.
     - bash: |
-        set -e
+        set -euo pipefail
+
         BE_IMG="$(containerRegistry)/$(backendImageName):$(TAG)"
         FE_IMG="$(containerRegistry)/$(frontendImageName):$(TAG)"
-        echo "Using backend image:  $BE_IMG"
-        echo "Using frontend image: $FE_IMG"
+
+        echo "Backend image:  $BE_IMG"
+        echo "Frontend image: $FE_IMG"
+
         mkdir -p out
         cp -r azure/* out/
 
-        # backend.yaml
-        if grep -q "__BACKEND_IMAGE__" out/backend.yaml; then
-          sed -i "s|__BACKEND_IMAGE__|$BE_IMG|g" out/backend.yaml
-        else
-          sed -i "0,/^[[:space:]]*image:/{s|^[[:space:]]*image:.*|        image: $BE_IMG|}" out/backend.yaml
+        kubectl version --client=true
+
+        kubectl set image -f out/backend.yaml \
+          deployment/backend backend="$BE_IMG" \
+          --local -o yaml > out/backend.patched.yaml
+        mv out/backend.patched.yaml out/backend.yaml
+
+        if [ "${BUILD_FRONTEND:-false}" = "true" ] && [ -f out/frontend.yaml ]; then
+          # Giả định resource "deployment/frontend" và container tên "frontend"
+          kubectl set image -f out/frontend.yaml \
+            deployment/frontend frontend="$FE_IMG" \
+            --local -o yaml > out/frontend.patched.yaml
+          mv out/frontend.patched.yaml out/frontend.yaml
         fi
 
-        # frontend.yaml (skip if you don’t build FE)
-        if [ "$(BuildFrontend)" = "true" ] && [ -f out/frontend.yaml ]; then
-          if grep -q "__FRONTEND_IMAGE__" out/frontend.yaml; then
-            sed -i "s|__FRONTEND_IMAGE__|$FE_IMG|g" out/frontend.yaml
-          else
-            sed -i "0,/^[[:space:]]*image:/{s|^[[:space:]]*image:.*|        image: $FE_IMG|}" out/frontend.yaml
-          fi
-        fi
+        echo "----- backend.yaml (after patch) -----"
+        nl -ba out/backend.yaml | sed -n '1,200p'
 
-        # always include ingress + mongodb as-is (assuming they are valid AKS YAMLs)
-        ls -la out
-      displayName: Inject image tags
+        kubectl apply --dry-run=client -n $(namespace) -f out/backend.yaml
+        if [ -f out/frontend.yaml ]; then
+          kubectl apply --dry-run=client -n $(namespace) -f out/frontend.yaml || true
+        fi
+      displayName: Patch manifests with kubectl 
 
     # Publish updated manifests for the Deploy stage
     - publish: out
