@@ -1,92 +1,218 @@
-# azure-pipelines.yml
+# Single pipeline: build+push (CI) then deploy (CD) on every commit to main or manual run.
 trigger:
   branches:
     include: [ main ]
-  paths:
-    include:
-      - src/backend/**
 
 pr:
   branches:
     include: [ main ]
-  paths:
-    include:
-      - src/backend/**
+
+pool:
+  vmImage: 'ubuntu-latest'
 
 variables:
-  vmImage: 'ubuntu-latest'
-  acrName: 'acrdevopssd6116'
-  acrLoginServer: 'acrdevopssd6116.azurecr.io'
-  imageName: 'todo-backend'        # ACR repository name (change if you like)
-  backendContext: 'src/backend'     # Docker build context
-  backendDockerfile: 'src/backend/Dockerfile'
+  # Service connections you created above
+  dockerRegistryServiceConnection: 'acr-conn'
+  kubernetesServiceConnection: 'aks-conn'
+
+  # Your ACR and image repositories
+  containerRegistry: 'acrdevopssd6116.azurecr.io'
+  backendImageName:  'backend'
+  frontendImageName: 'frontend'
+
+  # Target namespace in AKS (make sure it exists, or we create it in Deploy stage)
+  namespace: 'dev'
 
 stages:
-- stage: CI
-  displayName: Build, Scan & Push Backend
+- stage: BuildAndPush
+  displayName: Build & Push Docker Images
   jobs:
-  - job: backend
-    displayName: Backend CI
-    pool:
-      vmImage: $(vmImage)
+  - job: BuildPush
     steps:
     - checkout: self
-      displayName: Checkout
 
-    # Compute a unique tag: <branch>-<buildId>-<shortsha>
-    - task: Bash@3
-      name: computeTag
-      displayName: Compute Image Tag
-      inputs:
-        targetType: 'inline'
-        script: |
-          SHORT_SHA=$(echo "$(Build.SourceVersion)" | cut -c1-7)
-          TAG="$(Build.SourceBranchName)-$(Build.BuildId)-$SHORT_SHA"
-          echo "##vso[task.setvariable variable=TAG]$TAG"
-          echo "TAG=$TAG"
+    # Compute a unique tag: <branch>-<buildId>-<shortSha>
+    - bash: |
+        SHORT_SHA=$(echo "$(Build.SourceVersion)" | cut -c1-7)
+        TAG="$(Build.SourceBranchName)-$(Build.BuildId)-$SHORT_SHA"
+        echo "##vso[task.setvariable variable=TAG]$TAG"
+        echo "TAG=$TAG"
+      displayName: Compute image tag
 
-    # Build the Docker image (local) with tag $(imageName):$(TAG)
+    # Detect whether frontend Dockerfile is valid (it currently contains a literal "..." line)
+    - bash: |
+        if grep -qx '\.\.\.' src/frontend/Dockerfile; then
+          echo "Frontend Dockerfile contains '...' placeholder. Skipping FE build."
+          echo "##vso[task.setvariable variable=BuildFrontend]false"
+        else
+          echo "##vso[task.setvariable variable=BuildFrontend]true"
+        fi
+      displayName: Check frontend Dockerfile
+
+    # Login (auth also occurs in Docker@2, but this makes logs clearer)
     - task: Docker@2
-      displayName: Build Docker image (backend)
+      displayName: Login to ACR
       inputs:
-        command: 'build'
-        containerRegistry: 'acr-conn'
-        repository: '$(imageName)'
-        Dockerfile: '$(backendDockerfile)'
-        buildContext: '$(backendContext)'
+        command: login
+        containerRegistry: $(dockerRegistryServiceConnection)
+
+    # --- Build images ---
+    - task: Docker@2
+      displayName: Build backend image
+      inputs:
+        command: build
+        containerRegistry: $(dockerRegistryServiceConnection)
+        repository: $(backendImageName)
+        Dockerfile: src/backend/Dockerfile
+        buildContext: src/backend
         tags: |
           $(TAG)
 
-    # Security scan with Trivy (scan the local image name)
-    - script: |
-        docker run --rm \
-          -v /var/run/docker.sock:/var/run/docker.sock \
-          aquasec/trivy:latest image \
-          --no-progress \
-          --severity HIGH,CRITICAL \
-          --exit-code 1 \
-          $(imageName):$(TAG)
-      displayName: Security Scan (Trivy)
-
-    # Push to ACR: both unique tag and 'latest'
     - task: Docker@2
-      displayName: Push image to ACR
+      condition: eq(variables['BuildFrontend'], 'true')
+      displayName: Build frontend image
       inputs:
-        command: 'push'
-        containerRegistry: 'acr-conn'
-        repository: '$(imageName)'
+        command: build
+        containerRegistry: $(dockerRegistryServiceConnection)
+        repository: $(frontendImageName)
+        Dockerfile: src/frontend/Dockerfile
+        buildContext: src/frontend
+        tags: |
+          $(TAG)
+
+    # --- (Optional) Security scan example (commented) ---
+    # - script: docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest image --no-progress --severity HIGH,CRITICAL --exit-code 1 $(backendImageName):$(TAG)
+    #   displayName: Scan backend image (Trivy)
+    # - script: docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest image --no-progress --severity HIGH,CRITICAL --exit-code 1 $(frontendImageName):$(TAG)
+    #   condition: eq(variables['BuildFrontend'], 'true')
+    #   displayName: Scan frontend image (Trivy)
+
+    # --- Push images ---
+    - task: Docker@2
+      displayName: Push backend image
+      inputs:
+        command: push
+        containerRegistry: $(dockerRegistryServiceConnection)
+        repository: $(backendImageName)
         tags: |
           $(TAG)
           latest
 
-    # Publish a file with the fully-qualified tag for CD
-    - bash: |
-        echo "$(acrLoginServer)/$(imageName):$(TAG)" > image-tag.txt
-        cat image-tag.txt
-      displayName: Write image tag artifact
-
-    - task: PublishBuildArtifacts@1
-      displayName: Publish artifact (image-tag.txt)
+    - task: Docker@2
+      condition: eq(variables['BuildFrontend'], 'true')
+      displayName: Push frontend image
       inputs:
-        pathToPublish: 'image-tag.txt'
-        artifactName: 'image'
+        command: push
+        containerRegistry: $(dockerRegistryServiceConnection)
+        repository: $(frontendImageName)
+        tags: |
+          $(TAG)
+          latest
+
+    # --- Inject the computed tags into manifests under ./azure ---
+    # Uses placeholders if present; otherwise replaces the first "image:" line in each file.
+    - bash: |
+        set -e
+        BE_IMG="$(containerRegistry)/$(backendImageName):$(TAG)"
+        FE_IMG="$(containerRegistry)/$(frontendImageName):$(TAG)"
+        echo "Using backend image:  $BE_IMG"
+        echo "Using frontend image: $FE_IMG"
+        mkdir -p out
+        cp -r azure/* out/
+
+        # backend.yaml
+        if grep -q "__BACKEND_IMAGE__" out/backend.yaml; then
+          sed -i "s|__BACKEND_IMAGE__|$BE_IMG|g" out/backend.yaml
+        else
+          sed -i "0,/^[[:space:]]*image:/{s|^[[:space:]]*image:.*|        image: $BE_IMG|}" out/backend.yaml
+        fi
+
+        # frontend.yaml (skip if you don’t build FE)
+        if [ "$(BuildFrontend)" = "true" ] && [ -f out/frontend.yaml ]; then
+          if grep -q "__FRONTEND_IMAGE__" out/frontend.yaml; then
+            sed -i "s|__FRONTEND_IMAGE__|$FE_IMG|g" out/frontend.yaml
+          else
+            sed -i "0,/^[[:space:]]*image:/{s|^[[:space:]]*image:.*|        image: $FE_IMG|}" out/frontend.yaml
+          fi
+        fi
+
+        # always include ingress + mongodb as-is (assuming they are valid AKS YAMLs)
+        ls -la out
+      displayName: Inject image tags
+
+    # Publish updated manifests for the Deploy stage
+    - publish: out
+      artifact: manifests
+
+- stage: Deploy
+  displayName: Deploy to AKS
+  dependsOn: BuildAndPush
+  jobs:
+  - job: DeployJob
+    steps:
+    - checkout: none
+
+    # Bring the mutated manifests produced in the previous stage
+    - download: current
+      artifact: manifests
+      displayName: Download manifests
+
+    # Ensure namespace exists (idempotent)
+    - task: Kubernetes@1
+      displayName: Ensure namespace
+      inputs:
+        connectionType: 'Kubernetes Service Connection'
+        kubernetesServiceEndpoint: $(kubernetesServiceConnection)
+        command: apply
+        useConfigurationFile: true
+        configurationType: inline
+        inline: |
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: $(namespace)
+
+    # Apply MongoDB (optional for your app—adjust as needed)
+    - task: Kubernetes@1
+      displayName: Apply mongodb.yaml
+      inputs:
+        connectionType: 'Kubernetes Service Connection'
+        kubernetesServiceEndpoint: $(kubernetesServiceConnection)
+        namespace: $(namespace)
+        command: apply
+        useConfigurationFile: true
+        configuration: $(Pipeline.Workspace)/manifests/mongodb.yaml
+
+    # Apply backend
+    - task: Kubernetes@1
+      displayName: Apply backend.yaml
+      inputs:
+        connectionType: 'Kubernetes Service Connection'
+        kubernetesServiceEndpoint: $(kubernetesServiceConnection)
+        namespace: $(namespace)
+        command: apply
+        useConfigurationFile: true
+        configuration: $(Pipeline.Workspace)/manifests/backend.yaml
+
+    # Apply frontend (only if FE build was enabled)
+    - task: Kubernetes@1
+      condition: eq(variables['BuildFrontend'], 'true')
+      displayName: Apply frontend.yaml
+      inputs:
+        connectionType: 'Kubernetes Service Connection'
+        kubernetesServiceEndpoint: $(kubernetesServiceConnection)
+        namespace: $(namespace)
+        command: apply
+        useConfigurationFile: true
+        configuration: $(Pipeline.Workspace)/manifests/frontend.yaml
+
+    # Apply ingress (requires an ingress controller like ingress-nginx installed on AKS)
+    - task: Kubernetes@1
+      displayName: Apply ingress.yml
+      inputs:
+        connectionType: 'Kubernetes Service Connection'
+        kubernetesServiceEndpoint: $(kubernetesServiceConnection)
+        namespace: $(namespace)
+        command: apply
+        useConfigurationFile: true
+        configuration: $(Pipeline.Workspace)/manifests/ingress.yml
