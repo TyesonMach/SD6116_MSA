@@ -112,6 +112,9 @@ stages:
     - bash: |
         set -euo pipefail
 
+        # Read pipeline variable into a shell var
+        BF="$(BuildFrontend)"
+
         BE_IMG="$(containerRegistry)/$(backendImageName):$(TAG)"
         FE_IMG="$(containerRegistry)/$(frontendImageName):$(TAG)"
 
@@ -121,17 +124,16 @@ stages:
         mkdir -p out
         cp -r azure/* out/
 
-        kubectl version --client=true
-
+        # Patch backend.yaml safely (no sed). NOTE: --local + -f ONLY (no resource name)
         kubectl set image -f out/backend.yaml \
-          deployment/backend backend="$BE_IMG" \
+          backend="$BE_IMG" \
           --local -o yaml > out/backend.patched.yaml
         mv out/backend.patched.yaml out/backend.yaml
 
-        if [ "${BUILD_FRONTEND:-false}" = "true" ] && [ -f out/frontend.yaml ]; then
-          # Giả định resource "deployment/frontend" và container tên "frontend"
+        # Patch frontend only when you build FE and file exists
+        if [ "${BF:-false}" = "true" ] && [ -f out/frontend.yaml ]; then
           kubectl set image -f out/frontend.yaml \
-            deployment/frontend frontend="$FE_IMG" \
+            frontend="$FE_IMG" \
             --local -o yaml > out/frontend.patched.yaml
           mv out/frontend.patched.yaml out/frontend.yaml
         fi
@@ -139,6 +141,7 @@ stages:
         echo "----- backend.yaml (after patch) -----"
         nl -ba out/backend.yaml | sed -n '1,200p'
 
+        # Client-side validation before shipping to Deploy stage
         kubectl apply --dry-run=client -n $(namespace) -f out/backend.yaml
         if [ -f out/frontend.yaml ]; then
           kubectl apply --dry-run=client -n $(namespace) -f out/frontend.yaml || true
