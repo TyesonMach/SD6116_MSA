@@ -167,7 +167,7 @@ stages:
     steps:
     - checkout: none
 
-    # Bring the mutated manifests produced in the previous stage
+    # Download the rendered manifest (published as artifact "manifests")
     - download: current
       artifact: manifests
       displayName: Download manifests
@@ -187,12 +187,43 @@ stages:
           metadata:
             name: $(namespace)
 
-  - task: Kubernetes@1
-    displayName: Apply rendered manifests
-    inputs:
-      connectionType: 'Kubernetes Service Connection'
-      kubernetesServiceEndpoint: $(kubernetesServiceConnection)
-      namespace: $(namespace)
-      command: apply
-      useConfigurationFile: true
-      configuration: $(Pipeline.Workspace)/manifests/rendered.yaml
+    # Apply the single, Kustomize-rendered file
+    - task: Kubernetes@1
+      displayName: Apply rendered manifests
+      inputs:
+        connectionType: 'Kubernetes Service Connection'
+        kubernetesServiceEndpoint: $(kubernetesServiceConnection)
+        namespace: $(namespace)
+        command: apply
+        useConfigurationFile: true
+        configuration: $(Pipeline.Workspace)/manifests/rendered.yaml
+
+    # Optional: rollout checks and a quick status
+    - task: Kubernetes@1
+      displayName: Rollout status (backend)
+      inputs:
+        connectionType: 'Kubernetes Service Connection'
+        kubernetesServiceEndpoint: $(kubernetesServiceConnection)
+        namespace: $(namespace)
+        command: 'kubectl'
+        arguments: 'rollout status deploy/backend --timeout=120s'
+
+    - task: Kubernetes@1
+      condition: eq(variables['BuildFrontend'], 'true')
+      displayName: Rollout status (frontend)
+      inputs:
+        connectionType: 'Kubernetes Service Connection'
+        kubernetesServiceEndpoint: $(kubernetesServiceConnection)
+        namespace: $(namespace)
+        command: 'kubectl'
+        arguments: 'rollout status deploy/frontend --timeout=120s'
+
+    - task: Kubernetes@1
+      displayName: Get services
+      inputs:
+        connectionType: 'Kubernetes Service Connection'
+        kubernetesServiceEndpoint: $(kubernetesServiceConnection)
+        namespace: $(namespace)
+        command: 'kubectl'
+        arguments: 'get pods,svc -o wide'
+
