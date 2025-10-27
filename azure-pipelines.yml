@@ -112,7 +112,6 @@ stages:
     - bash: |
         set -euo pipefail
 
-        # Read pipeline variable into a shell var
         BF="$(BuildFrontend)"
 
         BE_IMG="$(containerRegistry)/$(backendImageName):$(TAG)"
@@ -124,24 +123,57 @@ stages:
         mkdir -p out
         cp -r azure/* out/
 
-        # Patch backend.yaml safely (no sed). NOTE: --local + -f ONLY (no resource name)
-        kubectl set image -f out/backend.yaml \
-          backend="$BE_IMG" \
-          --local -o yaml > out/backend.patched.yaml
-        mv out/backend.patched.yaml out/backend.yaml
+        split_and_patch () {
+          local in="$1" ; local container="$2" ; local newimg="$3"
 
-        # Patch frontend only when you build FE and file exists
+          # Tách multi-doc YAML thành nhiều file tạm
+          mkdir -p out/tmp
+          rm -f out/tmp/*
+          # csplit chia theo dòng '---' (đầu hoặc giữa file)
+          csplit -s -f out/tmp/part- "$in" '/^---$/' '{*}' || true
+
+          # Nếu chỉ có 1 doc (csplit không tạo file), tạo part-00 từ bản gốc
+          if [ "$(ls -1 out/tmp | wc -l)" -eq 0 ]; then
+            cp "$in" out/tmp/part-00
+          fi
+
+          # Ghép kết quả vào file mới
+          : > "${in}.new"
+          local i=0
+          local total=$(ls -1 out/tmp | wc -l)
+
+          for f in $(ls -1 out/tmp/part-* | sort); do
+            if grep -q '^kind:[[:space:]]*Deployment' "$f"; then
+              # Patch chỉ Deployment (không liên hệ cluster)
+              kubectl set image -f "$f" \
+                "${container}=${newimg}" \
+                --local -o yaml >> "${in}.new"
+            else
+              cat "$f" >> "${in}.new"
+            fi
+            i=$((i+1))
+            # Thêm dải phân cách giữa các documents (trừ doc cuối)
+            if [ "$i" -lt "$total" ]; then
+              printf "\n---\n" >> "${in}.new"
+            fi
+          done
+
+          mv "${in}.new" "$in"
+          rm -rf out/tmp
+        }
+
+        # Patch backend.yaml (container tên 'backend')
+        split_and_patch out/backend.yaml backend "$BE_IMG"
+
+        # Patch frontend.yaml nếu có build FE (container tên 'frontend')
         if [ "${BF:-false}" = "true" ] && [ -f out/frontend.yaml ]; then
-          kubectl set image -f out/frontend.yaml \
-            frontend="$FE_IMG" \
-            --local -o yaml > out/frontend.patched.yaml
-          mv out/frontend.patched.yaml out/frontend.yaml
+          split_and_patch out/frontend.yaml frontend "$FE_IMG"
         fi
 
         echo "----- backend.yaml (after patch) -----"
         nl -ba out/backend.yaml | sed -n '1,200p'
 
-        # Client-side validation before shipping to Deploy stage
+        # Dry-run kiểm tra YAML
         kubectl apply --dry-run=client -n $(namespace) -f out/backend.yaml
         if [ -f out/frontend.yaml ]; then
           kubectl apply --dry-run=client -n $(namespace) -f out/frontend.yaml || true
