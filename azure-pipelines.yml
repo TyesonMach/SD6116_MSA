@@ -112,11 +112,10 @@ stages:
     - bash: |
         set -euo pipefail
 
-        # Read pipeline variable into a shell var
-        BF="$(BuildFrontend)"
-
-        BE_IMG="$(containerRegistry)/$(backendImageName):$(TAG)"
-        FE_IMG="$(containerRegistry)/$(frontendImageName):$(TAG)"
+        # pull pipeline vars into env for yq's env()
+        export BE_IMG="$(containerRegistry)/$(backendImageName):$(TAG)"
+        export FE_IMG="$(containerRegistry)/$(frontendImageName):$(TAG)"
+        export BF="$(BuildFrontend)"
 
         echo "Backend image:  $BE_IMG"
         echo "Frontend image: $FE_IMG"
@@ -124,36 +123,25 @@ stages:
         mkdir -p out
         cp -r azure/* out/
 
-        # Install yq (single binary)
+        # Install yq v4 and confirm version
         YQ_VER="v4.44.3"
-        curl -sL "https://github.com/mikefarah/yq/releases/download/${YQ_VER}/yq_linux_amd64" -o yq
-        chmod +x yq
-        sudo mv yq /usr/local/bin/yq
+        curl -sSL "https://github.com/mikefarah/yq/releases/download/${YQ_VER}/yq_linux_amd64" -o yq
+        chmod +x yq && sudo mv yq /usr/local/bin/yq
+        yq --version
 
-        # Patch backend.yaml - only touch Deployment docs and the container named "backend"
-        yq -i '
-          if .kind == "Deployment" then
-            (.spec.template.spec.containers[] | select(.name=="backend") | .image) = strenv(BE_IMG)
-          else
-            .
-          end
-        ' out/backend.yaml
+        # Patch ONLY Deployment docs; keep Services untouched.
+        # backend.yaml: container name must be 'backend'
+        yq eval -i 'if .kind == "Deployment" then (.spec.template.spec.containers |= map(if .name == "backend" then (.image = env(BE_IMG)) else . end)) else . end' out/backend.yaml
 
-        # Patch frontend.yaml if we built FE and file exists (container named "frontend")
+        # frontend.yaml (only if building FE and file exists): container name must be 'frontend'
         if [ "${BF:-false}" = "true" ] && [ -f out/frontend.yaml ]; then
-          yq -i '
-            if .kind == "Deployment" then
-              (.spec.template.spec.containers[] | select(.name=="frontend") | .image) = strenv(FE_IMG)
-            else
-              .
-            end
-          ' out/frontend.yaml
+          yq eval -i 'if .kind == "Deployment" then (.spec.template.spec.containers |= map(if .name == "frontend" then (.image = env(FE_IMG)) else . end)) else . end' out/frontend.yaml
         fi
 
-        echo "----- backend.yaml (after patch) -----"
+        echo "----- backend.yaml (after yq patch) -----"
         nl -ba out/backend.yaml | sed -n '1,200p'
 
-        # Client-side validation to catch YAML issues early
+        # Client-side validation before deploy
         kubectl version --client=true
         kubectl apply --dry-run=client -n $(namespace) -f out/backend.yaml
         if [ -f out/frontend.yaml ]; then
