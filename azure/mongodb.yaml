@@ -1,28 +1,31 @@
----
+# StorageClass for AKS (Azure Disk CSI)
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
   name: mongo-sc
-provisioner: kubernetes.io/aws-ebs
+provisioner: disk.csi.azure.com
 parameters:
-  type: gp2
+  skuName: StandardSSD_LRS   # or Premium_LRS, StandardSSD_ZRS, ...
+reclaimPolicy: Delete
 volumeBindingMode: WaitForFirstConsumer
-
+allowVolumeExpansion: true
 ---
+# Stable ClusterIP Service for Mongo
 apiVersion: v1
 kind: Service
 metadata:
   name: mongo
   labels:
-    name: mongo
+    app: mongo
 spec:
   selector:
-    name: mongo
+    app: mongo
   ports:
     - port: 27017
-      protocol: TCP
       targetPort: 27017
+      protocol: TCP
 ---
+# Root username via ConfigMap (demo)
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -30,52 +33,53 @@ metadata:
 data:
   MONGODB_INITDB_ROOT_USERNAME: "user"
 ---
+# Root password via Secret (base64 **without newline**)
+# echo -n 'password' | base64   ->  cGFzc3dvcmQ=
 apiVersion: v1
 kind: Secret
 metadata:
   name: mongo-secrets
 type: Opaque
 data:
-  MONGODB_INITDB_ROOT_PASSWORD: cGFzc3dvcmQK
+  MONGODB_INITDB_ROOT_PASSWORD: cGFzc3dvcmQ=
 ---
+# StatefulSet using Azure Disk (managed-csi)
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: mongo
 spec:
+  serviceName: mongo
+  replicas: 1
   selector:
     matchLabels:
-      name: mongo
-  serviceName: "mongo"
-  replicas: 1
+      app: mongo
   template:
     metadata:
       labels:
-        name: mongo
+        app: mongo
     spec:
       terminationGracePeriodSeconds: 10
       containers:
-      - name: mongo
-        image: mongo
-        ports:
-          - containerPort: 27017
-        envFrom:
-         - configMapRef:             
-               name: mongo-config
-         - secretRef:
-             name: mongo-secrets
-        volumeMounts:
-            - name: data-volume
+        - name: mongo
+          image: mongo:6
+          args: ["--bind_ip_all"]           # listen on 0.0.0.0
+          ports:
+            - containerPort: 27017
+          envFrom:
+            - configMapRef:
+                name: mongo-config
+            - secretRef:
+                name: mongo-secrets
+          volumeMounts:
+            - name: data
               mountPath: /data/db
   volumeClaimTemplates:
     - metadata:
-        name: data-volume
+        name: data
       spec:
+        accessModes: ["ReadWriteOnce"]
         storageClassName: mongo-sc
-        accessModes:
-          - "ReadWriteOnce"
         resources:
           requests:
-            storage: "1Gi"
-
-
+            storage: 5Gi
