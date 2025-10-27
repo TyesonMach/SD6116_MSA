@@ -112,45 +112,51 @@ stages:
     - bash: |
         set -euo pipefail
 
-        # pull pipeline vars into env for yq's env()
-        export BE_IMG="$(containerRegistry)/$(backendImageName):$(TAG)"
-        export FE_IMG="$(containerRegistry)/$(frontendImageName):$(TAG)"
+        # Pull pipeline vars into env
         export BF="$(BuildFrontend)"
+        export REG="$(containerRegistry)"
+        export TAG="$(TAG)"
 
-        echo "Backend image:  $BE_IMG"
-        echo "Frontend image: $FE_IMG"
+        echo "Backend image:  ${REG}/$(backendImageName):${TAG}"
+        echo "Frontend image: ${REG}/$(frontendImageName):${TAG}"
 
         mkdir -p out
         cp -r azure/* out/
 
-        # Install yq v4 and confirm version
-        YQ_VER="v4.44.3"
-        curl -sSL "https://github.com/mikefarah/yq/releases/download/${YQ_VER}/yq_linux_amd64" -o yq
-        chmod +x yq && sudo mv yq /usr/local/bin/yq
-        yq --version
+        # Build kustomization.yaml dynamically (only add files that exist)
+        {
+          echo "resources:"
+          echo "- backend.yaml"
+          if [ "${BF:-false}" = "true" ] && [ -f out/frontend.yaml ]; then echo "- frontend.yaml"; fi
+          [ -f out/mongodb.yaml ] && echo "- mongodb.yaml"
+          [ -f out/ingress.yml ] && echo "- ingress.yml"
+          echo "images:"
+          echo "- name: ${REG}/backend"
+          echo "  newName: ${REG}/backend"
+          echo "  newTag: ${TAG}"
+          if [ "${BF:-false}" = "true" ] && [ -f out/frontend.yaml ]; then
+            echo "- name: ${REG}/frontend"
+            echo "  newName: ${REG}/frontend"
+            echo "  newTag: ${TAG}"
+          fi
+        } > out/kustomization.yaml
 
-        # Patch ONLY Deployment docs; keep Services untouched.
-        # backend.yaml: container name must be 'backend'
-        yq eval -i 'if .kind == "Deployment" then (.spec.template.spec.containers |= map(if .name == "backend" then (.image = env(BE_IMG)) else . end)) else . end' out/backend.yaml
+        echo "----- kustomization.yaml -----"
+        cat out/kustomization.yaml
 
-        # frontend.yaml (only if building FE and file exists): container name must be 'frontend'
-        if [ "${BF:-false}" = "true" ] && [ -f out/frontend.yaml ]; then
-          yq eval -i 'if .kind == "Deployment" then (.spec.template.spec.containers |= map(if .name == "frontend" then (.image = env(FE_IMG)) else . end)) else . end' out/frontend.yaml
-        fi
-
-        echo "----- backend.yaml (after yq patch) -----"
-        nl -ba out/backend.yaml | sed -n '1,200p'
-
-        # Client-side validation before deploy
+        # Render all manifests with updated images (safe)
         kubectl version --client=true
-        kubectl apply --dry-run=client -n $(namespace) -f out/backend.yaml
-        if [ -f out/frontend.yaml ]; then
-          kubectl apply --dry-run=client -n $(namespace) -f out/frontend.yaml || true
-        fi
-      displayName: Patch manifests with kubectl 
+        kubectl kustomize out > out/rendered.yaml
+
+        echo "----- rendered.yaml (first 200 lines) -----"
+        nl -ba out/rendered.yaml | sed -n '1,200p'
+
+        # Client-side validation (catch YAML issues early)
+        kubectl apply --dry-run=client -n $(namespace) -f out/rendered.yaml
+      displayName: Build manifests with Kustomize
 
     # Publish updated manifests for the Deploy stage
-    - publish: out
+    - publish: out/rendered.yaml
       artifact: manifests
 
 - stage: Deploy
@@ -181,47 +187,12 @@ stages:
           metadata:
             name: $(namespace)
 
-    # Apply MongoDB (optional for your app—adjust as needed)
-    - task: Kubernetes@1
-      displayName: Apply mongodb.yaml
-      inputs:
-        connectionType: 'Kubernetes Service Connection'
-        kubernetesServiceEndpoint: $(kubernetesServiceConnection)
-        namespace: $(namespace)
-        command: apply
-        useConfigurationFile: true
-        configuration: $(Pipeline.Workspace)/manifests/mongodb.yaml
-
-    # Apply backend
-    - task: Kubernetes@1
-      displayName: Apply backend.yaml
-      inputs:
-        connectionType: 'Kubernetes Service Connection'
-        kubernetesServiceEndpoint: $(kubernetesServiceConnection)
-        namespace: $(namespace)
-        command: apply
-        useConfigurationFile: true
-        configuration: $(Pipeline.Workspace)/manifests/backend.yaml
-
-    # Apply frontend (only if FE build was enabled)
-    - task: Kubernetes@1
-      condition: eq(variables['BuildFrontend'], 'true')
-      displayName: Apply frontend.yaml
-      inputs:
-        connectionType: 'Kubernetes Service Connection'
-        kubernetesServiceEndpoint: $(kubernetesServiceConnection)
-        namespace: $(namespace)
-        command: apply
-        useConfigurationFile: true
-        configuration: $(Pipeline.Workspace)/manifests/frontend.yaml
-
-    # Apply ingress (requires an ingress controller like ingress-nginx installed on AKS)
-    - task: Kubernetes@1
-      displayName: Apply ingress.yml
-      inputs:
-        connectionType: 'Kubernetes Service Connection'
-        kubernetesServiceEndpoint: $(kubernetesServiceConnection)
-        namespace: $(namespace)
-        command: apply
-        useConfigurationFile: true
-        configuration: $(Pipeline.Workspace)/manifests/ingress.yml
+  - task: Kubernetes@1
+    displayName: Apply rendered manifests
+    inputs:
+      connectionType: 'Kubernetes Service Connection'
+      kubernetesServiceEndpoint: $(kubernetesServiceConnection)
+      namespace: $(namespace)
+      command: apply
+      useConfigurationFile: true
+      configuration: $(Pipeline.Workspace)/manifests/rendered.yaml
