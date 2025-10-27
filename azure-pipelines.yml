@@ -201,8 +201,8 @@ stages:
         connectionType: 'Kubernetes Service Connection'
         kubernetesServiceEndpoint: $(kubernetesServiceConnection)
         namespace: $(namespace)
-        command: 'kubectl'
-        arguments: 'rollout status deploy/backend --timeout=120s'
+        command: 'rollout'
+        arguments: 'status deploy/backend --timeout=180s'
 
     - task: Kubernetes@1
       condition: eq(variables['BuildFrontend'], 'true')
@@ -211,15 +211,14 @@ stages:
         connectionType: 'Kubernetes Service Connection'
         kubernetesServiceEndpoint: $(kubernetesServiceConnection)
         namespace: $(namespace)
-        command: 'kubectl'
-        arguments: 'rollout status deploy/frontend --timeout=120s'
+        command: 'rollout'
+        arguments: 'status deploy/frontend --timeout=180s'
 
     - task: Kubernetes@1
-      displayName: Get services
+      displayName: Get pods and services
       inputs:
         connectionType: 'Kubernetes Service Connection'
         kubernetesServiceEndpoint: $(kubernetesServiceConnection)
         namespace: $(namespace)
-        command: 'kubectl'
-        arguments: 'get pods,svc -o wide'
-
+        command: 'get'
+        arguments: 'pods,svc -o wide'
