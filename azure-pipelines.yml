@@ -151,8 +151,9 @@ stages:
         echo "----- rendered.yaml (first 200 lines) -----"
         nl -ba out/rendered.yaml | sed -n '1,200p'
 
-        # Client-side validation (catch YAML issues early)
-        kubectl apply --dry-run=client -n $(namespace) -f out/rendered.yaml
+        # Local syntax check only — do NOT contact cluster
+        # (avoid downloading OpenAPI -> no kubeconfig needed here)
+        kubectl apply --dry-run=client --validate=false -f out/rendered.yaml >/dev/null
       displayName: Build manifests with Kustomize
 
     # Publish updated manifests for the Deploy stage
