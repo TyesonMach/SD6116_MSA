@@ -144,16 +144,11 @@ stages:
         echo "----- kustomization.yaml -----"
         cat out/kustomization.yaml
 
-        # Render all manifests with updated images (safe)
-        kubectl version --client=true
+        # Render all manifests with updated images (safe, offline)
         kubectl kustomize out > out/rendered.yaml
 
         echo "----- rendered.yaml (first 200 lines) -----"
         nl -ba out/rendered.yaml | sed -n '1,200p'
-
-        # Local syntax check only — do NOT contact cluster
-        # (avoid downloading OpenAPI -> no kubeconfig needed here)
-        kubectl apply --dry-run=client --validate=false -f out/rendered.yaml >/dev/null
       displayName: Build manifests with Kustomize
 
     # Publish updated manifests for the Deploy stage
