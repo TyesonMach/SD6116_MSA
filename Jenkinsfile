@@ -72,26 +72,24 @@ pipeline {
     stage('Build & Push Docker Images') {
       steps {
         script {
-          def e = readProperties file: 'ecr.env'
-          def REG = e['ECR_REGISTRY']
+        def e = readProperties file: 'ecr.env'
+        def REG = e['ECR_REGISTRY']
 
-          // Backend
-          sh """
-            docker build -f src/backend/Dockerfile -t ${BACKEND_IMAGE_NAME}:${TAG} src/backend
-            docker tag ${BACKEND_IMAGE_NAME}:${TAG} ${REG}/${BACKEND_IMAGE_NAME}:${TAG}
-            docker push ${REG}/${BACKEND_IMAGE_NAME}:${TAG}
-          """
+        sh """
+            docker build -f src/backend/Dockerfile -t ${BACKEND_IMAGE_NAME}:${env.TAG} src/backend
+            docker tag ${BACKEND_IMAGE_NAME}:${env.TAG} ${REG}/${BACKEND_IMAGE_NAME}:${env.TAG}
+            docker push ${REG}/${BACKEND_IMAGE_NAME}:${env.TAG}
+        """
 
-          // Frontend
-          if (env.BuildFrontend == 'true') {
+        if (env.BuildFrontend == 'true') {
             sh """
-              docker build -f src/frontend/Dockerfile -t ${FRONTEND_IMAGE_NAME}:${TAG} src/frontend
-              docker tag ${FRONTEND_IMAGE_NAME}:${TAG} ${REG}/${FRONTEND_IMAGE_NAME}:${TAG}
-              docker push ${REG}/${FRONTEND_IMAGE_NAME}:${TAG}
+            docker build -f src/frontend/Dockerfile -t ${FRONTEND_IMAGE_NAME}:${env.TAG} src/frontend
+            docker tag ${FRONTEND_IMAGE_NAME}:${env.TAG} ${REG}/${FRONTEND_IMAGE_NAME}:${env.TAG}
+            docker push ${REG}/${FRONTEND_IMAGE_NAME}:${env.TAG}
             """
-          } else {
+        } else {
             echo 'Skip building frontend because Dockerfile contains "..." placeholder.'
-          }
+        }
         }
       }
     }
@@ -99,40 +97,32 @@ pipeline {
     stage('Render manifests (Kustomize)') {
       steps {
         script {
-          def e = readProperties file: 'ecr.env'
-          def REG = e['ECR_REGISTRY']
-
-          sh """
+        def e = readProperties file: 'ecr.env'
+        def REG = e['ECR_REGISTRY']
+        sh """
             set -euo pipefail
-            MANIFEST_DIR="aws"
-            [ -d "\$MANIFEST_DIR" ] || MANIFEST_DIR="azure"
-
-            mkdir -p out
-            cp -r "\$MANIFEST_DIR"/* out/
+            MANIFEST_DIR="aws"; [ -d "\$MANIFEST_DIR" ] || MANIFEST_DIR="azure"
+            mkdir -p out && cp -r "\$MANIFEST_DIR"/* out/
 
             {
-              echo "resources:"
-              [ -f out/backend.yaml ] && echo "- backend.yaml"
-              if [ "${BuildFrontend:-false}" = "true" ] && [ -f out/frontend.yaml ]; then echo "- frontend.yaml"; fi
-              [ -f out/mongodb.yaml ] && echo "- mongodb.yaml"
-              [ -f out/ingress.yml ]  && echo "- ingress.yml"
-              echo "images:"
-              echo "- name: ${REG}/${BACKEND_IMAGE_NAME}"
-              echo "  newName: ${REG}/${BACKEND_IMAGE_NAME}"
-              echo "  newTag: ${TAG}"
-              if [ "${BuildFrontend:-false}" = "true" ] && [ -f out/frontend.yaml ]; then
+            echo "resources:"
+            [ -f out/backend.yaml ] && echo "- backend.yaml"
+            if [ "${BuildFrontend:-false}" = "true" ] && [ -f out/frontend.yaml ]; then echo "- frontend.yaml"; fi
+            [ -f out/mongodb.yaml ] && echo "- mongodb.yaml"
+            [ -f out/ingress.yml ]  && echo "- ingress.yml"
+            echo "images:"
+            echo "- name: ${REG}/${BACKEND_IMAGE_NAME}"
+            echo "  newName: ${REG}/${BACKEND_IMAGE_NAME}"
+            echo "  newTag: ${env.TAG}"
+            if [ "${BuildFrontend:-false}" = "true" ] && [ -f out/frontend.yaml ]; then
                 echo "- name: ${REG}/${FRONTEND_IMAGE_NAME}"
                 echo "  newName: ${REG}/${FRONTEND_IMAGE_NAME}"
-                echo "  newTag: ${TAG}"
-              fi
+                echo "  newTag: ${env.TAG}"
+            fi
             } > out/kustomization.yaml
 
-            echo "----- kustomization.yaml -----"
-            cat out/kustomization.yaml
-
-            # Render
             kubectl kustomize out > out/rendered.yaml
-          """
+        """
         }
         archiveArtifacts artifacts: 'out/rendered.yaml', fingerprint: true
       }
