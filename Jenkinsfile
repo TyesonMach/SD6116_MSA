@@ -106,7 +106,6 @@ pipeline {
             MANIFEST_DIR="aws"
             [ -d "\$MANIFEST_DIR" ] || MANIFEST_DIR="azure"
 
-            # Đẩy các biến Groovy vào biến shell để dùng $VAR (không dùng ${...})
             BUILD_FRONTEND='${env.BuildFrontend}'
             ECR_REG='${REG}'
             BE='${BACKEND_IMAGE_NAME}'
