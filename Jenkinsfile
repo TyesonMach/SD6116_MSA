@@ -95,37 +95,54 @@ pipeline {
     }
 
     stage('Render manifests (Kustomize)') {
-      steps {
+    steps {
         script {
-        def e = readProperties file: 'ecr.env'
-        def REG = e['ECR_REGISTRY']
+        def props = readProperties file: 'ecr.env'
+        def REG = props['ECR_REGISTRY']
+
         sh """
             set -euo pipefail
-            MANIFEST_DIR="aws"; [ -d "\$MANIFEST_DIR" ] || MANIFEST_DIR="azure"
-            mkdir -p out && cp -r "\$MANIFEST_DIR"/* out/
+
+            MANIFEST_DIR="aws"
+            [ -d "\$MANIFEST_DIR" ] || MANIFEST_DIR="azure"
+
+            # Đẩy các biến Groovy vào biến shell để dùng $VAR (không dùng ${...})
+            BUILD_FRONTEND='${env.BuildFrontend}'
+            ECR_REG='${REG}'
+            BE='${BACKEND_IMAGE_NAME}'
+            FE='${FRONTEND_IMAGE_NAME}'
+            TAG='${env.TAG}'
+
+            mkdir -p out
+            cp -r "\$MANIFEST_DIR"/* out/ || true
 
             {
             echo "resources:"
             [ -f out/backend.yaml ] && echo "- backend.yaml"
-            if [ "${BuildFrontend:-false}" = "true" ] && [ -f out/frontend.yaml ]; then echo "- frontend.yaml"; fi
+            if [ "\$BUILD_FRONTEND" = "true" ] && [ -f out/frontend.yaml ]; then echo "- frontend.yaml"; fi
             [ -f out/mongodb.yaml ] && echo "- mongodb.yaml"
             [ -f out/ingress.yml ]  && echo "- ingress.yml"
+
             echo "images:"
-            echo "- name: ${REG}/${BACKEND_IMAGE_NAME}"
-            echo "  newName: ${REG}/${BACKEND_IMAGE_NAME}"
-            echo "  newTag: ${env.TAG}"
-            if [ "${BuildFrontend:-false}" = "true" ] && [ -f out/frontend.yaml ]; then
-                echo "- name: ${REG}/${FRONTEND_IMAGE_NAME}"
-                echo "  newName: ${REG}/${FRONTEND_IMAGE_NAME}"
-                echo "  newTag: ${env.TAG}"
+            echo "- name: \$ECR_REG/\$BE"
+            echo "  newName: \$ECR_REG/\$BE"
+            echo "  newTag: \$TAG"
+
+            if [ "\$BUILD_FRONTEND" = "true" ] && [ -f out/frontend.yaml ]; then
+                echo "- name: \$ECR_REG/\$FE"
+                echo "  newName: \$ECR_REG/\$FE"
+                echo "  newTag: \$TAG"
             fi
             } > out/kustomization.yaml
+
+            echo '----- kustomization.yaml -----'
+            cat out/kustomization.yaml
 
             kubectl kustomize out > out/rendered.yaml
         """
         }
         archiveArtifacts artifacts: 'out/rendered.yaml', fingerprint: true
-      }
+    }
     }
 
     stage('Deploy to EKS') {
