@@ -42,34 +42,31 @@ pipeline {
     }
 
     stage('AWS Login & ECR Login') {
-      steps {
-        script {
-          sh """
+    steps {
+        // Dùng AWS Credentials (Access key/Secret key) có ID = aws-creds-id
+        withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-creds-id']]) {
+        sh '''
+            set -euo pipefail
+
             aws --version
             aws sts get-caller-identity
-            """
-          // Nếu bạn dùng AccessKey/Secret (không chạy Jenkins trên EC2/role):
-          // withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-creds-id']]) { ... }
-          sh """
-            ACCOUNT_ID=\$(aws sts get-caller-identity --query Account --output text)
-            echo "ACCOUNT_ID=\$ACCOUNT_ID"
-            echo "AWS_REGION=${AWS_REGION}"
-            ECR_REGISTRY="\$ACCOUNT_ID.dkr.ecr.${AWS_REGION}.amazonaws.com"
-            echo "ECR_REGISTRY=\$ECR_REGISTRY" > ecr.env
 
-            aws ecr get-login-password --region ${AWS_REGION} \
-              | docker login --username AWS --password-stdin "\$ECR_REGISTRY"
+            ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+            REG="$ACCOUNT_ID.dkr.ecr.${AWS_REGION}.amazonaws.com"
+            echo "ECR_REGISTRY=$REG" > ecr.env
 
-            # Tạo repo nếu chưa có (idempotent)
             aws ecr describe-repositories --repository-name ${BACKEND_IMAGE_NAME} --region ${AWS_REGION} >/dev/null 2>&1 || \
-              aws ecr create-repository --repository-name ${BACKEND_IMAGE_NAME} --region ${AWS_REGION}
+            aws ecr create-repository --repository-name ${BACKEND_IMAGE_NAME} --region ${AWS_REGION}
             if [ "${BuildFrontend}" = "true" ]; then
-              aws ecr describe-repositories --repository-name ${FRONTEND_IMAGE_NAME} --region ${AWS_REGION} >/dev/null 2>&1 || \
+            aws ecr describe-repositories --repository-name ${FRONTEND_IMAGE_NAME} --region ${AWS_REGION} >/dev/null 2>&1 || \
                 aws ecr create-repository --repository-name ${FRONTEND_IMAGE_NAME} --region ${AWS_REGION}
             fi
-          """
+
+            aws ecr get-login-password --region ${AWS_REGION} \
+            | docker login --username AWS --password-stdin "$REG"
+        '''
         }
-      }
+    }
     }
 
     stage('Build & Push Docker Images') {
