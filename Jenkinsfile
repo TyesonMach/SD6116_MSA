@@ -40,43 +40,44 @@ pipeline {
       }
     }
 
-    stage('AWS Login & ECR Login') {
-      steps {
-        withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-creds-id']]) {
-          script {
-            sh '''
-              set -euo pipefail
+  stage('AWS Login & ECR Login') {
+    steps {
+      withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-creds-id']]) {
+        script {
+          sh '''
+            set -euo pipefail
 
-              aws --version
-              aws sts get-caller-identity >/dev/null
+            aws --version
+            aws sts get-caller-identity >/dev/null
 
-              ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-              REG="$ACCOUNT_ID.dkr.ecr.'${AWS_REGION}'.amazonaws.com"
+            ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+            REG="$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com"
 
-              aws ecr describe-repositories --repository-name '${BACKEND_IMAGE_NAME}' --region '${AWS_REGION}' >/dev/null 2>&1 || \
-                aws ecr create-repository --repository-name '${BACKEND_IMAGE_NAME}' --region '${AWS_REGION}'
+            aws ecr describe-repositories --repository-name "$BACKEND_IMAGE_NAME" --region "$AWS_REGION" >/dev/null 2>&1 || \
+              aws ecr create-repository --repository-name "$BACKEND_IMAGE_NAME" --region "$AWS_REGION"
 
-              if [ "'${BuildFrontend}'" = "true" ]; then
-                aws ecr describe-repositories --repository-name '${FRONTEND_IMAGE_NAME}' --region '${AWS_REGION}' >/dev/null 2>&1 || \
-                  aws ecr create-repository --repository-name '${FRONTEND_IMAGE_NAME}' --region '${AWS_REGION}'
-              fi
+            if [ "$BuildFrontend" = "true" ]; then
+              aws ecr describe-repositories --repository-name "$FRONTEND_IMAGE_NAME" --region "$AWS_REGION" >/dev/null 2>&1 || \
+                aws ecr create-repository --repository-name "$FRONTEND_IMAGE_NAME" --region "$AWS_REGION"
+            fi
 
-              aws ecr get-login-password --region '${AWS_REGION}' \
-                | docker login --username AWS --password-stdin "$REG"
+            aws ecr get-login-password --region "$AWS_REGION" \
+              | docker login --username AWS --password-stdin "$REG"
 
-              echo "ECR_REGISTRY=$REG" > ecr.env
-            '''
+            echo "ECR_REGISTRY=$REG" > ecr.env
+            echo "REG=$REG"
+          '''
 
-            env.ECR_REGISTRY = sh(
-              script: "aws sts get-caller-identity --query Account --output text | xargs -I{} echo {}.dkr.ecr.${AWS_REGION}.amazonaws.com",
-              returnStdout: true
-            ).trim()
-
-            echo "ECR_REGISTRY=${env.ECR_REGISTRY}"
-          }
+          env.ECR_REGISTRY = sh(
+            script: 'aws sts get-caller-identity --query Account --output text',
+            returnStdout: true
+          ).trim() + ".dkr.ecr.${env.AWS_REGION}.amazonaws.com"
+          echo "ECR_REGISTRY=${env.ECR_REGISTRY}"
         }
       }
     }
+  }
+
 
     stage('Build & Push Docker Images') {
       steps {
