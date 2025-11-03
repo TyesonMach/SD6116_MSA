@@ -11,8 +11,6 @@ pipeline {
 
     BACKEND_IMAGE_NAME  = 'backend'
     FRONTEND_IMAGE_NAME = 'frontend'
-
-    TAG = ''
   }
 
   stages {
@@ -27,13 +25,14 @@ pipeline {
     stage('Compute TAG & Decide FE Build') {
       steps {
         script {
-          // TAG = <branch>-<buildNumber>-<shortsha>
-          def shortSha = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
-          def branch   = env.BRANCH_NAME ?: 'main'
+          def shortSha = sh(script: 'git rev-parse --short=7 HEAD', returnStdout: true).trim()
+          def branch   = (env.BRANCH_NAME ?: 'main').replaceAll('[^A-Za-z0-9._-]', '-')
           env.TAG = "${branch}-${env.BUILD_NUMBER}-${shortSha}"
 
-          def hasDots = sh(script: "grep -qx '\\.\\.\\.' src/frontend/Dockerfile && echo yes || echo no", returnStdout: true).trim()
-          env.BuildFrontend = (hasDots == 'yes') ? 'false' : 'true'
+          env.BuildFrontend = sh(
+            script: "grep -qx '\\.\\.\\.' src/frontend/Dockerfile && echo false || echo true",
+            returnStdout: true
+          ).trim()
 
           echo "TAG=${env.TAG}"
           echo "BuildFrontend=${env.BuildFrontend}"
@@ -42,65 +41,86 @@ pipeline {
     }
 
     stage('AWS Login & ECR Login') {
-    steps {
-        // Dùng AWS Credentials (Access key/Secret key) có ID = aws-creds-id
+      steps {
         withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-creds-id']]) {
-        sh '''
-            set -euo pipefail
+          script {
+            sh '''
+              set -euo pipefail
 
-            aws --version
-            aws sts get-caller-identity
+              aws --version
+              aws sts get-caller-identity >/dev/null
 
-            ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-            REG="$ACCOUNT_ID.dkr.ecr.${AWS_REGION}.amazonaws.com"
-            echo "ECR_REGISTRY=$REG" > ecr.env
+              ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+              REG="$ACCOUNT_ID.dkr.ecr.'${AWS_REGION}'.amazonaws.com"
 
-            aws ecr describe-repositories --repository-name ${BACKEND_IMAGE_NAME} --region ${AWS_REGION} >/dev/null 2>&1 || \
-            aws ecr create-repository --repository-name ${BACKEND_IMAGE_NAME} --region ${AWS_REGION}
-            if [ "${BuildFrontend}" = "true" ]; then
-            aws ecr describe-repositories --repository-name ${FRONTEND_IMAGE_NAME} --region ${AWS_REGION} >/dev/null 2>&1 || \
-                aws ecr create-repository --repository-name ${FRONTEND_IMAGE_NAME} --region ${AWS_REGION}
-            fi
+              aws ecr describe-repositories --repository-name '${BACKEND_IMAGE_NAME}' --region '${AWS_REGION}' >/dev/null 2>&1 || \
+                aws ecr create-repository --repository-name '${BACKEND_IMAGE_NAME}' --region '${AWS_REGION}'
 
-            aws ecr get-login-password --region ${AWS_REGION} \
-            | docker login --username AWS --password-stdin "$REG"
-        '''
+              if [ "'${BuildFrontend}'" = "true" ]; then
+                aws ecr describe-repositories --repository-name '${FRONTEND_IMAGE_NAME}' --region '${AWS_REGION}' >/dev/null 2>&1 || \
+                  aws ecr create-repository --repository-name '${FRONTEND_IMAGE_NAME}' --region '${AWS_REGION}'
+              fi
+
+              aws ecr get-login-password --region '${AWS_REGION}' \
+                | docker login --username AWS --password-stdin "$REG"
+
+              echo "ECR_REGISTRY=$REG" > ecr.env
+            '''
+
+            env.ECR_REGISTRY = sh(
+              script: "aws sts get-caller-identity --query Account --output text | xargs -I{} echo {}.dkr.ecr.${AWS_REGION}.amazonaws.com",
+              returnStdout: true
+            ).trim()
+
+            echo "ECR_REGISTRY=${env.ECR_REGISTRY}"
+          }
         }
-    }
+      }
     }
 
     stage('Build & Push Docker Images') {
       steps {
         script {
-        def e = readProperties file: 'ecr.env'
-        def REG = e['ECR_REGISTRY']
+          def REG = (env.ECR_REGISTRY ?: '').trim()
+          if (!env.TAG?.trim()) {
+            error "TAG is empty. Check stage 'Compute TAG & Decide FE Build'."
+          }
+          if (!REG) {
+            error "ECR_REGISTRY is empty. Ensure stage 'AWS Login & ECR Login' set env.ECR_REGISTRY."
+          }
 
-        sh """
-            docker build -f src/backend/Dockerfile -t ${BACKEND_IMAGE_NAME}:${env.TAG} src/backend
-            docker tag ${BACKEND_IMAGE_NAME}:${env.TAG} ${REG}/${BACKEND_IMAGE_NAME}:${env.TAG}
-            docker push ${REG}/${BACKEND_IMAGE_NAME}:${env.TAG}
-        """
+          echo "Using REG=${REG}, TAG=${env.TAG}, BuildFrontend=${env.BuildFrontend}"
 
-        if (env.BuildFrontend == 'true') {
+          withEnv(["DOCKER_BUILDKIT=1"]) {
+            // Backend
             sh """
-            docker build -f src/frontend/Dockerfile -t ${FRONTEND_IMAGE_NAME}:${env.TAG} src/frontend
-            docker tag ${FRONTEND_IMAGE_NAME}:${env.TAG} ${REG}/${FRONTEND_IMAGE_NAME}:${env.TAG}
-            docker push ${REG}/${FRONTEND_IMAGE_NAME}:${env.TAG}
+              set -e
+              docker build -f src/backend/Dockerfile -t ${BACKEND_IMAGE_NAME}:${env.TAG} src/backend
+              docker tag   ${BACKEND_IMAGE_NAME}:${env.TAG} ${REG}/${BACKEND_IMAGE_NAME}:${env.TAG}
+              docker push  ${REG}/${BACKEND_IMAGE_NAME}:${env.TAG}
             """
-        } else {
-            echo 'Skip building frontend because Dockerfile contains "..." placeholder.'
-        }
+
+            // Frontend
+            if (env.BuildFrontend == 'true') {
+              sh """
+                set -e
+                docker build -f src/frontend/Dockerfile -t ${FRONTEND_IMAGE_NAME}:${env.TAG} src/frontend
+                docker tag   ${FRONTEND_IMAGE_NAME}:${env.TAG} ${REG}/${FRONTEND_IMAGE_NAME}:${env.TAG}
+                docker push  ${REG}/${FRONTEND_IMAGE_NAME}:${env.TAG}
+              """
+            } else {
+              echo 'Skip building frontend because Dockerfile contains "..." placeholder.'
+            }
+          }
         }
       }
     }
 
     stage('Render manifests (Kustomize)') {
-    steps {
+      steps {
         script {
-        def props = readProperties file: 'ecr.env'
-        def REG = props['ECR_REGISTRY']
-
-        sh """
+          def REG = env.ECR_REGISTRY
+          sh """
             set -euo pipefail
 
             MANIFEST_DIR="aws"
@@ -116,59 +136,59 @@ pipeline {
             cp -r "\$MANIFEST_DIR"/* out/ || true
 
             {
-            echo "resources:"
-            [ -f out/backend.yaml ] && echo "- backend.yaml"
-            if [ "\$BUILD_FRONTEND" = "true" ] && [ -f out/frontend.yaml ]; then echo "- frontend.yaml"; fi
-            [ -f out/mongodb.yaml ] && echo "- mongodb.yaml"
-            [ -f out/ingress.yml ]  && echo "- ingress.yml"
+              echo "resources:"
+              [ -f out/backend.yaml ]  && echo "- backend.yaml"
+              if [ "\$BUILD_FRONTEND" = "true" ] && [ -f out/frontend.yaml ]; then echo "- frontend.yaml"; fi
+              [ -f out/mongodb.yaml ]  && echo "- mongodb.yaml"
+              [ -f out/ingress.yml ]   && echo "- ingress.yml"
 
-            echo "images:"
-            echo "- name: \$ECR_REG/\$BE"
-            echo "  newName: \$ECR_REG/\$BE"
-            echo "  newTag: \$TAG"
+              echo "images:"
+              echo "- name: \$ECR_REG/\$BE"
+              echo "  newName: \$ECR_REG/\$BE"
+              echo "  newTag: \$TAG"
 
-            if [ "\$BUILD_FRONTEND" = "true" ] && [ -f out/frontend.yaml ]; then
+              if [ "\$BUILD_FRONTEND" = "true" ] && [ -f out/frontend.yaml ]; then
                 echo "- name: \$ECR_REG/\$FE"
                 echo "  newName: \$ECR_REG/\$FE"
                 echo "  newTag: \$TAG"
-            fi
+              fi
             } > out/kustomization.yaml
 
             echo '----- kustomization.yaml -----'
             cat out/kustomization.yaml
 
             kubectl kustomize out > out/rendered.yaml
-        """
+          """
         }
         archiveArtifacts artifacts: 'out/rendered.yaml', fingerprint: true
-    }
+      }
     }
 
     stage('Deploy to EKS') {
       steps {
-        script {
-          def e = readProperties file: 'ecr.env'
-          sh """
-            aws eks update-kubeconfig --name ${EKS_CLUSTER} --region ${AWS_REGION}
-
-            cat <<EOF | kubectl apply -f -
-            apiVersion: v1
-            kind: Namespace
-            metadata:
-              name: ${NAMESPACE}
-            EOF
-
-            kubectl apply -n ${NAMESPACE} -f out/rendered.yaml
-
-            # Rollout status backend
-            kubectl rollout status deploy/backend -n ${NAMESPACE} --timeout=180s || true
-          """
-          if (env.BuildFrontend == 'true') {
+        withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-creds-id']]) {
+          script {
             sh """
-              kubectl rollout status deploy/frontend -n ${NAMESPACE} --timeout=180s || true
+              set -e
+
+              aws eks update-kubeconfig --name ${EKS_CLUSTER} --region ${AWS_REGION}
+
+              cat <<EOF | kubectl apply -f -
+              apiVersion: v1
+              kind: Namespace
+              metadata:
+                name: ${NAMESPACE}
+              EOF
+
+              kubectl apply -n ${NAMESPACE} -f out/rendered.yaml
+
+              kubectl rollout status deploy/backend  -n ${NAMESPACE} --timeout=180s || true
             """
+            if (env.BuildFrontend == 'true') {
+              sh "kubectl rollout status deploy/frontend -n ${NAMESPACE} --timeout=180s || true"
+            }
+            sh "kubectl get pods,svc -n ${NAMESPACE} -o wide || true"
           }
-          sh "kubectl get pods,svc -n ${NAMESPACE} -o wide || true"
         }
       }
     }
