@@ -174,12 +174,7 @@ pipeline {
 
               aws eks update-kubeconfig --name ${EKS_CLUSTER} --region ${AWS_REGION}
 
-              cat <<EOF | kubectl apply -f -
-              apiVersion: v1
-              kind: Namespace
-              metadata:
-                name: ${NAMESPACE}
-              EOF
+              kubectl get ns ${NAMESPACE} >/dev/null 2>&1 || kubectl create ns ${NAMESPACE}
 
               kubectl apply -n ${NAMESPACE} -f out/rendered.yaml
 
