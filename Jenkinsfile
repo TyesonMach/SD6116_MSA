@@ -1,5 +1,6 @@
 pipeline {
   agent any
+  options { skipDefaultCheckout(true) } // đừng checkout tự động
   options {
     timestamps()
   }
@@ -17,18 +18,8 @@ pipeline {
 
     stage('Checkout') {
       steps {
-        deleteDir()
-        withCredentials([usernamePassword(credentialsId: 'github-pat', usernameVariable: 'GIT_USER', passwordVariable: 'GIT_TOKEN')]) {
-          sh '''
-            git --version
-            git init
-            git config user.email "ci@local"
-            git config user.name "jenkins"
-            git remote add origin https://${GIT_USER}:${GIT_TOKEN}@github.com/TyesonMach/SD6116_MSA.git
-            git fetch --depth=1 origin main
-            git checkout -B main FETCH_HEAD
-          '''
-        }
+        deleteDir()            // dọn sạch workspace trước
+        checkout scm           // để plugin tự clone lại repo
       }
     }
 
