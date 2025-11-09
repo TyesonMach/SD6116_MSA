@@ -17,10 +17,21 @@ pipeline {
 
     stage('Checkout') {
       steps {
-        checkout scm
-        sh 'git --no-pager log -1 --oneline'
+        deleteDir()
+        withCredentials([usernamePassword(credentialsId: 'github-pat', usernameVariable: 'GIT_USER', passwordVariable: 'GIT_TOKEN')]) {
+          sh '''
+            git --version
+            git init
+            git config user.email "ci@local"
+            git config user.name "jenkins"
+            git remote add origin https://${GIT_USER}:${GIT_TOKEN}@github.com/TyesonMach/SD6116_MSA.git
+            git fetch --depth=1 origin main
+            git checkout -B main FETCH_HEAD
+          '''
+        }
       }
     }
+
 
     stage('Compute TAG & Decide FE Build') {
       steps {
