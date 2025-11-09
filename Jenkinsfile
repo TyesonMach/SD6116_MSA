@@ -1,8 +1,8 @@
 pipeline {
   agent any
-  options { skipDefaultCheckout(true) } // đừng checkout tự động
   options {
     timestamps()
+    skipDefaultCheckout(true)
   }
 
   environment {
@@ -16,12 +16,22 @@ pipeline {
 
   stages {
 
-    stage('Checkout') {
-      steps {
-        deleteDir()            // dọn sạch workspace trước
-        checkout scm           // để plugin tự clone lại repo
+    stages {
+      stage('Checkout') {
+        steps {
+          deleteDir()
+          checkout scm
+        }
       }
-    }
+
+      stage('Sanity tools') {
+        steps {
+          sh 'git --version'
+          sh 'aws --version'
+          sh 'docker version'
+          sh 'kubectl version --client || true'
+        }
+      }
 
 
     stage('Compute TAG & Decide FE Build') {
