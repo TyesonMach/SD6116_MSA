@@ -23,7 +23,7 @@ pipeline {
           checkout scm
         }
       }
-
+    }
     stage('Sanity tools') {
       steps {
         sh 'git --version'
