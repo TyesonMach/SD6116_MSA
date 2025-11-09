@@ -6,7 +6,7 @@ pipeline {
 
   environment {
     AWS_REGION   = 'ap-southeast-1'
-    EKS_CLUSTER  = 'eksdevopssd6116'
+    EKS_CLUSTER  = 'devops-lab-eks'
     NAMESPACE    = 'dev'
 
     BACKEND_IMAGE_NAME  = 'backend'
