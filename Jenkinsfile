@@ -24,14 +24,14 @@ pipeline {
         }
       }
 
-      stage('Sanity tools') {
-        steps {
-          sh 'git --version'
-          sh 'aws --version'
-          sh 'docker version'
-          sh 'kubectl version --client || true'
-        }
+    stage('Sanity tools') {
+      steps {
+        sh 'git --version'
+        sh 'aws --version'
+        sh 'docker version'
+        sh 'kubectl version --client || true'
       }
+    }
 
 
     stage('Compute TAG & Decide FE Build') {
